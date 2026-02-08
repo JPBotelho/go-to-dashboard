@@ -1,0 +1,53 @@
+{
+  "menuItems": [
+    {
+      "description": "Datadog dashboard filtered by app label",
+      "title": "Datadog App Dashboard",
+      "url": "https://app.datadoghq.com/dashboard/abc-123",
+      "filters": {
+        "mustHaveLabels": [
+          { "key": "app" }
+        ]
+      },
+      "templateVars": [
+        { "label": "app", "urlAppend": "?tpl_var_app=$LABEL_VALUE" }
+      ]
+    },
+    {
+      "description": "Only shows for pods with app=nginx and env=production",
+      "title": "Prod Nginx Logs",
+      "url": "https://grafana.example.com/nginx",
+      "filters": {
+        "mustHaveLabels": [
+          { "key": "app", "value": "nginx" },
+          { "key": "env", "value": "production" }
+        ]
+      }
+    },
+    {
+      "description": "Only shows for pods with the 'app' label (any value)",
+      "title": "App Dashboard",
+      "url": "https://grafana.example.com/apps",
+      "filters": {
+        "mustHaveLabels": [
+          { "key": "app" }
+        ]
+      }
+    },
+    {
+      "description": "Google — always shows (no filters)",
+      "title": "Google",
+      "url": "https://google.com"
+    },
+    {
+      "description": "GitHub — always shows (no filters)",
+      "title": "GitHub",
+      "url": "https://github.com"
+    },
+    {
+      "description": "Kubernetes docs — always shows (no filters)",
+      "title": "K8s docs",
+      "url": "https://kubernetes.io/docs"
+    }
+  ]
+}
