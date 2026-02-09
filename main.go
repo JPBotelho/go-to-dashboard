@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/pkg/browser"
+	"golang.design/x/clipboard"
 )
 
 // 10 ANSI colors with good contrast on dark backgrounds
@@ -40,6 +41,7 @@ func colorForKey(key string) string {
 func main() {
 	pod := flag.String("pod", "", "pod name (from k9s)")
 	namespace := flag.String("namespace", "", "namespace (from k9s)")
+	debug := flag.Bool("debug", false, "show DEBUG option to inspect pod spec paths")
 	flag.Parse()
 
 	configPath := "config.json"
@@ -53,29 +55,40 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Build pod context and fetch labels
+	// Build pod context and fetch full JSON
+	var podErr string
 	pd := NewPodData(*pod, *namespace)
 	if pd != nil {
-		if err := pd.FetchLabels(); err != nil {
-			fmt.Fprintf(os.Stderr, "kubectl get pod: %v\n", err)
+		if err := pd.FetchPodJSON(); err != nil {
+			podErr = fmt.Sprintf("kubectl get pod: %v", err)
+			fmt.Fprintf(os.Stderr, "%s\n", podErr)
 		}
 	}
 
-	// Filter menu items based on pod labels
+	// Filter menu items based on pod conditions
 	items := FilterMenuItems(cfg.MenuItems, pd)
 	if len(items) == 0 {
-		fmt.Fprintln(os.Stderr, "no menu items match this pod's labels")
+		fmt.Fprintln(os.Stderr, "no menu items match this pod")
 	}
 
 	// Build fzf input: "title\tdescription\turl" — resolve templateVars into URLs
-	var podLabels map[string]string
-	if pd != nil {
-		podLabels = pd.Labels
-	}
+	const debugMarker = "__DEBUG_POD_SPEC__"
 	var lines []string
+	// Add DEBUG entry at the top when --debug and pod data is available
+	if *debug && pd != nil && pd.Parsed != nil {
+		lines = append(lines, "[DEBUG] Open pod spec paths in VS Code\tAll dot-notation paths and values for this pod\t"+debugMarker)
+	}
 	for _, it := range items {
-		url := it.ResolveURL(podLabels)
-		lines = append(lines, it.Title+"\t"+it.Description+"\t"+url)
+		url := it.ResolveURL(pd)
+		desc := it.Description
+		if pd != nil {
+			podDesc := pd.Name
+			if pd.Namespace != "" {
+				podDesc = pd.Namespace + "/" + pd.Name
+			}
+			desc = "[" + podDesc + "] " + desc
+		}
+		lines = append(lines, it.Title+"\t"+desc+"\t"+url)
 	}
 	input := strings.Join(lines, "\n")
 
@@ -87,43 +100,53 @@ func main() {
 			header = fmt.Sprintf("Open a dashboard — pod: %s", pd.Name)
 		}
 	}
+	if podErr != "" {
+		header += fmt.Sprintf("\n⚠ ERROR: %s", podErr)
+	}
 
-	// Write per-item preview files: split labels into "Filtered by" and "Not filtered by"
+	// Write per-item preview files showing scoped templateVars and all pod labels
 	var previewDir string
 	previewCmd := `echo {2}; echo; echo "── URL ──"; echo; echo "  {3}"`
-	if pd != nil && pd.Labels != nil {
+	if pd != nil && pd.Parsed != nil {
+		podLabels := pd.Labels()
 		tmpDir, err := os.MkdirTemp("", "fzf-pod-preview-*")
 		if err == nil {
 			previewDir = tmpDir
 			defer os.RemoveAll(previewDir)
 
 			for i, it := range items {
-				// Collect label keys used by this item's templateVars
-				usedKeys := map[string]bool{}
+				// Collect resolved templateVar info
+				type tvResolved struct {
+					path, value, appended string
+				}
+				var resolved []tvResolved
 				for _, tv := range it.TemplateVars {
-					usedKeys[tv.Label] = true
+					val := tv.resolve(pd)
+					if val == "" {
+						continue
+					}
+					appended := strings.ReplaceAll(tv.URLAppend, "$VALUE", val)
+					resolved = append(resolved, tvResolved{tv.Path, val, appended})
+				}
+
+				// Build colored URL: base URL plain, each templateVar append colored
+				coloredURL := "  " + it.URL
+				for _, r := range resolved {
+					color := colorForKey(r.path)
+					coloredURL += fmt.Sprintf("%s%s%s", color, r.appended, colorReset)
 				}
 
 				// Sort all label keys
-				allKeys := make([]string, 0, len(pd.Labels))
-				for k := range pd.Labels {
+				allKeys := make([]string, 0, len(podLabels))
+				for k := range podLabels {
 					allKeys = append(allKeys, k)
 				}
 				sort.Strings(allKeys)
 
-				// Build "Filtered by" (labels used in templateVars) and "All Pod Labels"
-				var filtered []string
-				for _, k := range allKeys {
-					if usedKeys[k] {
-						color := colorForKey(k)
-						filtered = append(filtered, fmt.Sprintf("  %s%s = %s%s", color, k, pd.Labels[k], colorReset))
-					}
-				}
-
-				var allLabels []string
+				var allLabelLines []string
 				for _, k := range allKeys {
 					color := colorForKey(k)
-					allLabels = append(allLabels, fmt.Sprintf("  %s%s = %s%s", color, k, pd.Labels[k], colorReset))
+					allLabelLines = append(allLabelLines, fmt.Sprintf("  %s%s = %s%s", color, k, podLabels[k], colorReset))
 				}
 
 				fpath := filepath.Join(previewDir, fmt.Sprintf("%d.txt", i))
@@ -131,20 +154,29 @@ func main() {
 				if err != nil {
 					continue
 				}
-				if len(filtered) > 0 {
-					fmt.Fprintf(f, "── Page will be scoped to ──\n\n")
-					for _, l := range filtered {
-						fmt.Fprintln(f, l)
-					}
+				// URL section with colored templateVar segments
+				fmt.Fprintf(f, "── URL ──\n\n")
+				fmt.Fprintln(f, coloredURL)
+				if len(resolved) > 0 {
 					fmt.Fprintln(f)
+					for _, r := range resolved {
+						color := colorForKey(r.path)
+						fmt.Fprintf(f, "  %s%s%s = %s\n", color, r.path, colorReset, r.value)
+					}
 				}
-				fmt.Fprintf(f, "── All Pod Labels ──\n\n")
-				for _, l := range allLabels {
+				fmt.Fprintln(f)
+				// Pod info section
+				fmt.Fprintf(f, "── Pod Info ──\n\n")
+				podName, _ := pd.ResolvePath("metadata.name")
+				nodeName, _ := pd.ResolvePath("spec.nodeName")
+				fmt.Fprintf(f, "  %spod%s  = %s\n", colorForKey("pod"), colorReset, stringify(podName))
+				fmt.Fprintf(f, "  %snode%s = %s\n", colorForKey("node"), colorReset, stringify(nodeName))
+				for _, l := range allLabelLines {
 					fmt.Fprintln(f, l)
 				}
 				f.Close()
 			}
-			previewCmd = fmt.Sprintf(`echo {2}; echo; echo "── URL ──"; echo; echo "  {3}"; echo; cat "%s/{n}.txt" 2>/dev/null`, previewDir)
+			previewCmd = fmt.Sprintf(`echo {2}; echo; cat "%s/{n}.txt" 2>/dev/null`, previewDir)
 		}
 	}
 
@@ -178,6 +210,28 @@ func main() {
 	}
 
 	url := strings.TrimSpace(parts[len(parts)-1])
+	if url == debugMarker {
+		// Pipe flattened pod paths into VS Code via stdin
+		paths := pd.FlattenPaths()
+		content := strings.Join(paths, "\n") + "\n"
+		// Copy to clipboard
+		if err := clipboard.Init(); err != nil {
+			fmt.Fprintf(os.Stderr, "clipboard init: %v\n", err)
+		} else {
+			clipboard.Write(clipboard.FmtText, []byte(content))
+			fmt.Fprintf(os.Stderr, "Copied %d paths to clipboard\n", len(paths))
+		}
+		// Also try opening in VS Code
+		codeCmd := exec.Command("code", "-")
+		codeCmd.Stdin = strings.NewReader(content)
+		codeCmd.Stdout = os.Stdout
+		codeCmd.Stderr = os.Stderr
+		if err := codeCmd.Run(); err != nil {
+			fmt.Fprintf(os.Stderr, "code -: %v\n", err)
+		}
+		time.Sleep(5 * time.Second)
+		return
+	}
 	if err := openURL(url); err != nil {
 		fmt.Fprintf(os.Stderr, "open: %v\n", err)
 	}

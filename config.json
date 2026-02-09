@@ -5,12 +5,13 @@
       "title": "Datadog App Dashboard",
       "url": "https://app.datadoghq.com/dashboard/abc-123",
       "filters": {
-        "mustHaveLabels": [
-          { "key": "app" }
+        "conditions": [
+          { "path": "metadata.labels", "keyPattern": "app" }
         ]
       },
       "templateVars": [
-        { "label": "app", "urlAppend": "?tpl_var_app=$LABEL_VALUE" }
+        { "path": "metadata.labels.app", "urlAppend": "?tpl_var_app=$VALUE" },
+        { "path": "spec.nodeName", "urlAppend": "&host=$VALUE" }
       ]
     },
     {
@@ -18,9 +19,9 @@
       "title": "Prod Nginx Logs",
       "url": "https://grafana.example.com/nginx",
       "filters": {
-        "mustHaveLabels": [
-          { "key": "app", "value": "nginx" },
-          { "key": "env", "value": "production" }
+        "conditions": [
+          { "path": "metadata.labels", "keyPattern": "app", "valuePattern": "nginx" },
+          { "path": "metadata.labels", "keyPattern": "env", "valuePattern": "production" }          
         ]
       }
     },
@@ -29,8 +30,8 @@
       "title": "App Dashboard",
       "url": "https://grafana.example.com/apps",
       "filters": {
-        "mustHaveLabels": [
-          { "key": "app" }
+        "conditions": [
+          { "path": "metadata.labels", "keyPattern": "app" }
         ]
       }
     },
