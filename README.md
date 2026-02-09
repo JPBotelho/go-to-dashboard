@@ -5,9 +5,11 @@ A k9s plugin that shows a filterable menu of dashboards/links via fzf. Select on
 ## Features
 
 - Menu items defined in `config.json` (loaded at runtime, no rebuild needed)
-- Items can be **filtered by pod labels** so only relevant dashboards appear
-- URLs can have **template variables** that inject pod label values (e.g. Datadog `tpl_var_*` params)
-- Preview pane shows the item description, resolved URL, filtered-by labels, and all pod labels (color-coded)
+- Items can be **filtered by arbitrary pod fields** using dot-notation paths and regex patterns (labels, annotations, status, node name, etc.)
+- **Negative filters** supported via `invert` (e.g. "must NOT have annotation X")
+- URLs can have **template variables** that inject any pod field value (e.g. Datadog `tpl_var_*` params, node names, pod names)
+- Preview pane shows the resolved URL with color-coded template variable segments, pod info, and all labels
+- `--debug` flag adds a menu option to inspect all available pod spec paths
 - Cross-platform URL opening (WSL, Linux, macOS, Windows)
 
 ## Build
@@ -20,7 +22,7 @@ go build -o go-to-dashboard .
 ## Requirements
 
 - **fzf** on PATH
-- **kubectl** on PATH (to fetch pod labels)
+- **kubectl** on PATH (to fetch pod JSON)
 
 ## k9s plugin config
 
@@ -50,26 +52,46 @@ plugins:
 | `title` | yes | Text shown in the fzf list |
 | `description` | yes | Shown in the fzf preview pane |
 | `url` | yes | Base URL to open |
-| `filters.mustHaveLabels` | no | Only show this item if the pod has these labels |
-| `templateVars` | no | Append to the URL based on pod label values |
+| `filters.conditions` | no | Only show this item if the pod matches all conditions |
+| `templateVars` | no | Append to the URL based on pod field values |
 
 ### Filters
 
-Each entry in `mustHaveLabels` has a `key` and an optional `value`:
+Each entry in `conditions` matches against the pod's JSON using dot-notation paths:
 
-- `{ "key": "app" }` — pod must have the `app` label (any value)
-- `{ "key": "env", "value": "production" }` — pod must have `env=production`
+| Field | Default | Description |
+|-------|---------|-------------|
+| `path` | **required** | Dot-notation path into the pod JSON (e.g. `metadata.labels`, `spec.nodeName`) |
+| `keyPattern` | `.*` | Regex for map keys (only for map fields like labels/annotations). Implicitly anchored with `^...$` |
+| `valuePattern` | `.*` | Regex for values. Implicitly anchored with `^...$` |
+| `invert` | `false` | Negate the condition (e.g. "must NOT have") |
 
-Items with no filters always appear.
+Patterns are implicitly anchored, so `app` matches exactly `app`, not `myapp`. Use `app.*` for prefix matching, `.*team.*` for substring matching.
+
+Examples:
+
+- `{ "path": "metadata.labels", "keyPattern": "app" }` — pod must have the `app` label (any value)
+- `{ "path": "metadata.labels", "keyPattern": "app", "valuePattern": "nginx" }` — pod must have `app=nginx`
+- `{ "path": "status.phase", "valuePattern": "Running" }` — pod must be Running
+- `{ "path": "spec.nodeName", "valuePattern": "prod-.*" }` — pod must be on a prod node
+- `{ "path": "metadata.annotations", "keyPattern": "internal\\.skip", "invert": true }` — pod must NOT have the annotation
+
+All conditions are ANDed together. Items with no conditions always appear.
 
 ### Template variables
 
 Each entry in `templateVars` has:
 
-- `label` — pod label key to look up
-- `urlAppend` — string appended to the URL; `$LABEL_VALUE` is replaced with the label's value
+| Field | Required | Description |
+|-------|----------|-------------|
+| `path` | yes | Dot-notation path to a value (e.g. `metadata.labels.app`, `spec.nodeName`) |
+| `urlAppend` | yes | String appended to the URL; `$VALUE` is replaced with the resolved value |
 
-If the label doesn't exist on the pod, that `urlAppend` is skipped.
+If the path doesn't resolve, that `urlAppend` is skipped.
+
+### Debug mode
+
+Pass `--debug` to add a `[DEBUG]` option at the top of the fzf menu that shows all available dot-notation paths for the current pod (copied to clipboard and opened in VS Code). Useful for discovering which paths to use in conditions and templateVars.
 
 ### Example
 
@@ -81,14 +103,25 @@ If the label doesn't exist on the pod, that `urlAppend` is skipped.
       "title": "Datadog App Dashboard",
       "url": "https://app.datadoghq.com/dashboard/abc-123",
       "filters": {
-        "mustHaveLabels": [
-          { "key": "app" }
+        "conditions": [
+          { "path": "metadata.labels", "keyPattern": "app" }
         ]
       },
       "templateVars": [
-        { "label": "app", "urlAppend": "?tpl_var_app=$LABEL_VALUE" },
-        { "label": "env", "urlAppend": "&tpl_var_env=$LABEL_VALUE" }
+        { "path": "metadata.labels.app", "urlAppend": "?tpl_var_app=$VALUE" },
+        { "path": "spec.nodeName", "urlAppend": "&host=$VALUE" }
       ]
+    },
+    {
+      "description": "Only shows for pods with app=nginx and env=production",
+      "title": "Prod Nginx Logs",
+      "url": "https://grafana.example.com/nginx",
+      "filters": {
+        "conditions": [
+          { "path": "metadata.labels", "keyPattern": "app", "valuePattern": "nginx" },
+          { "path": "metadata.labels", "keyPattern": "env", "valuePattern": "production" }
+        ]
+      }
     },
     {
       "description": "Always shows (no filters)",
@@ -99,8 +132,8 @@ If the label doesn't exist on the pod, that `urlAppend` is skipped.
 }
 ```
 
-For a pod with `app=nginx` and `env=production`, selecting "Datadog App Dashboard" opens:
+For a pod with `app=nginx` on node `prod-pool-node-01`, selecting "Datadog App Dashboard" opens:
 
 ```
-https://app.datadoghq.com/dashboard/abc-123?tpl_var_app=nginx&tpl_var_env=production
+https://app.datadoghq.com/dashboard/abc-123?tpl_var_app=nginx&host=prod-pool-node-01
 ```
